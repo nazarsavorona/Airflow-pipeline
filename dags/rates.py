@@ -8,9 +8,18 @@ from airflow import DAG
 from airflow import settings
 from airflow.exceptions import AirflowNotFoundException
 from airflow.hooks.base import BaseHook
-from airflow.models import Connection
+from airflow.models import Connection, DagRun
 from airflow.operators.python import PythonOperator
 from airflow.providers.postgres.operators.postgres import PostgresOperator
+from requests import RequestException
+
+
+def check_another_dag_run(dag_id):
+    # Check if there is any running DagRun for the current DAG
+    running_dag_runs = DagRun.find(dag_id=dag_id, state='running')
+
+    if len(running_dag_runs) > 1:
+        raise RuntimeError(f"Another instance of DAG '{dag_id}' is already running.")
 
 
 def create_connection_if_not_exists(conn_id, conn_type, host, port, login, password):
@@ -53,6 +62,13 @@ def get_exchange_rates():
     url = f'http://data.fixer.io/api/latest?access_key={api_key}'
     response = requests.get(url)
     data = response.json()
+
+    # if not "success": true, fail with error
+    if not data['success']:
+        logging.info(data)
+        error_message = data.get('error', 'Unknown error')
+        raise RequestException(f"API request failed: {error_message}")
+
     # get only base, date, rates
     data = {key: data[key] for key in ['base', 'date', 'rates']}
     return data
@@ -99,7 +115,6 @@ def sort_rates(ti):
         if r is None:
             to_insert.append(rate)
         elif float(r[4]) != rate['value']:
-            logging.info(f"rate is different: {r[4]} != {rate['value']}")
             to_update.append(rate)
 
     cur.close()
@@ -156,6 +171,14 @@ with DAG(
         schedule_interval="@daily",
         catchup=False
 ) as dag:
+    # check if another instance of this DAG is running
+    check_task = PythonOperator(
+        task_id='check_another_dag_run',
+        python_callable=check_another_dag_run,
+        op_kwargs={'dag_id': dag.dag_id},
+        dag=dag
+    )
+
     # TODO : handle when variables are not set, based on requirements
     db_connection_id = os.getenv('CONNECTION_ID')
     db_connection_type = os.getenv('CONNECTION_TYPE')
@@ -233,4 +256,5 @@ with DAG(
         dag=dag
     )
 
-    provide_postgres >> create_table >> get_rates >> transform_rates >> sort_rates >> [insert_rates, update_rates]
+    check_task >> provide_postgres >> create_table >> get_rates >> transform_rates >> sort_rates >> [insert_rates,
+                                                                                                     update_rates]
