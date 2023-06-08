@@ -18,6 +18,8 @@ services:
     command:
       - standalone
     image: apache/airflow:2.3.0-python3.8
+    env_file:
+      - .env
     #    mount the dags folder
     volumes:
       - ./dags:/opt/airflow/dags
